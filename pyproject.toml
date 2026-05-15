@@ -1,0 +1,10 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quest-mcp-server"
+version = "0.1.0"
+description = "Quest Salesforce CSM Connector — MCP Server"
+requires-python = ">=3.11"
+dependencies = []
