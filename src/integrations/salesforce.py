@@ -87,7 +87,15 @@ class SalesforceClient:
         last_error: Optional[Exception] = None
 
         for attempt in range(MAX_RETRIES + 1):
-            token = await self._auth.get_access_token()
+            try:
+                token = await self._auth.get_access_token()
+            except AuthenticationError as exc:
+                logger.error("Authentication failed (attempt %d): %s", attempt + 1, exc)
+                last_error = SalesforceAPIError(f"Authentication failed: {exc}", status_code=401)
+                if attempt < MAX_RETRIES:
+                    continue
+                break
+
             url = self._build_url(token, path)
             headers = {
                 "Authorization": f"{token.token_type} {token.access_token}",
