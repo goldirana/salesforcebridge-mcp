@@ -23,7 +23,7 @@ class ClientCredentialsAuth:
     OAuth 2.0 Client Credentials flow.
 
     Use this for dev / early phases. Replace with
-    AuthorizationCodeAuth for per-user auth in Phase 3.
+    AuthorizationCodeAuth for per-user auth.
     """
 
     def __init__(self, token_store: TokenStore) -> None:
@@ -46,10 +46,6 @@ class ClientCredentialsAuth:
     async def _request_token(self) -> TokenData:
         """Exchange client credentials for an access token."""
         url = f"{self._sf.instance_url}{TOKEN_ENDPOINT}"
-
-        import sys
-        print(f"[DEBUG] Token URL: {url}", file=sys.stderr)
-        print(f"[DEBUG] Instance URL from config: {self._sf.instance_url}", file=sys.stderr)
 
         payload = {
             "grant_type": "client_credentials",

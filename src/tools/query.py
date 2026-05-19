@@ -21,7 +21,8 @@ FORBIDDEN_KEYWORDS = re.compile(
 @registry.register
 class SoqlQueryTool(BaseTool):
     name = "soql_query"
-    description = "Execute a read-only SOQL query against Salesforce and return the results."
+    description = """Execute a read-only SOQL query against Salesforce and return the results.
+    Always pass the limit and let the user know about it if they exceed the max limit."""
     roles = ["admin", "csm", "viewer"]
     input_schema = {
         "type": "object",
@@ -77,8 +78,7 @@ class SoqlQueryTool(BaseTool):
         return ToolResult(
             success=True,
             data={
-                "totalSize": total,
-                "records": records,
+                "totalSize": total, 
                 "done": result.get("done", True),
             },
             record_count=len(records),

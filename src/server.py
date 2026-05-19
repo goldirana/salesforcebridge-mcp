@@ -41,9 +41,9 @@ sf_client = SalesforceClient(auth)
 
 # MCP server
 mcp = FastMCP(
-    name="Quest Salesforce",
+    name="Salesforce CSM Connector",
     instructions=(
-        "You are connected to Quest's Salesforce org. "
+        "You are connected to Salesforce org. "
         "Use 'describe_object' first if you're unsure what fields exist. "
         "Then use 'soql_query' to search, or the record tools to create/update/delete."
     ),
