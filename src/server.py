@@ -9,7 +9,7 @@ from fastmcp import FastMCP
 from src.config import settings
 from src.observability.logging import setup_logging, ToolTimer
 from src.observability.health import health_checker
-from src.auth.token_store import InMemoryTokenStore
+from src.auth.token_store import InMemoryTokenStore, FileTokenStore
 from src.integrations.salesforce import SalesforceClient
 from src.tools.registry import registry
 from src.tools.base import ToolResult
@@ -37,7 +37,7 @@ setup_logging(
 from src.auth.oauth_authorization_code import AuthorizationCodeAuth, AuthorizationError
 from src.auth.callback_server import OAuthCallbackServer
 
-token_store = InMemoryTokenStore() # Change it with redis or any persistent store in production to share tokens across server instances and restarts
+token_store = FileTokenStore()  # Persists tokens to .tokens.json across restarts
 # =========================
 ## For testing use the client credentials
 # from src.auth.oauth_client_credentials import ClientCredentialsAuth
@@ -74,18 +74,20 @@ mcp = FastMCP(
 
 # ── Auth tools (per-user OAuth) ──
 
-@mcp.tool(name="auth_start", description="Start the OAuth login flow for a user. Returns the Salesforce authorization URL the user must visit. After logging in, use 'auth_complete' with the redirect URL from the browser.")
-async def auth_start(user_id: str) -> dict:
+@mcp.tool(name="auth_start", description="Start the OAuth login flow. Returns the Salesforce authorization URL. After the user logs in, they should copy the full redirect URL from the browser and pass it to 'auth_complete'. Do NOT call auth_wait.")
+async def auth_start(user_id: str = "") -> dict:
     """Generate an authorization URL and start the callback listener."""
     callback_server.start()
-    url = user_auth.generate_authorization_url(user_id)
-    return {"authorization_url": url, "user_id": user_id, "instructions": "After logging in, if you see a connection error page, copy the full URL from the browser address bar and pass it to 'auth_complete'."}
+    # Always use DEFAULT_USER_ID for single-user MCP sessions
+    url = user_auth.generate_authorization_url(DEFAULT_USER_ID)
+    return {"authorization_url": url, "user_id": DEFAULT_USER_ID, "next_step": "After the user logs in at Salesforce, they will be redirected to a localhost URL. Ask them to copy that full URL and then call 'auth_complete' with it."}
 
 
 @mcp.tool(name="auth_complete", description="Complete the OAuth login. Pass the full redirect URL from the browser address bar (e.g. http://localhost:8000/oauth/callback?code=...&state=...). Use this after logging in at Salesforce.")
 async def auth_complete(redirect_url: str) -> dict:
     """Parse code/state from the redirect URL and exchange for tokens."""
     from urllib.parse import urlparse, parse_qs
+    import httpx
     try:
         parsed = urlparse(redirect_url)
         params = parse_qs(parsed.query)
@@ -98,21 +100,23 @@ async def auth_complete(redirect_url: str) -> dict:
         token = await user_auth.handle_callback(code, state)
         callback_server.stop()
         return {"success": True, "instance_url": token.instance_url}
+    except httpx.TimeoutException:
+        return {"success": False, "error": "Request to Salesforce timed out. Check your network connection and try again."}
     except AuthorizationError as exc:
         return {"success": False, "error": str(exc)}
 
 
-@mcp.tool(name="auth_wait", description="Wait for the OAuth callback after the user logs in at Salesforce. Only works if the callback server is reachable on localhost.")
+@mcp.tool(name="auth_wait", description="[Internal] Wait for OAuth callback on localhost. Do NOT use this — use 'auth_complete' with the redirect URL instead.")
 async def auth_wait(user_id: str) -> dict:
     """Wait for OAuth callback and complete token exchange."""
     try:
-        code, state = await callback_server.wait_for_callback(timeout=300)
+        code, state = await callback_server.wait_for_callback(timeout=30)
         token = await user_auth.handle_callback(code, state)
         callback_server.stop()
         return {"success": True, "instance_url": token.instance_url, "user_id": user_id}
     except TimeoutError:
         callback_server.stop()
-        return {"success": False, "error": "Login timed out — no callback received within 5 minutes. Use 'auth_complete' with the redirect URL instead."}
+        return {"success": False, "error": "Callback server did not receive the redirect. Use 'auth_complete' with the redirect URL from your browser instead."}
     except AuthorizationError as exc:
         callback_server.stop()
         return {"success": False, "error": str(exc)}
@@ -128,18 +132,18 @@ async def auth_callback(code: str, state: str) -> dict:
         return {"success": False, "error": str(exc)}
 
 
-@mcp.tool(name="auth_status", description="Check if a user is currently authenticated with Salesforce.")
-async def auth_status(user_id: str) -> dict:
-    """Check authentication status for a user."""
-    authenticated = await user_auth.is_authenticated(user_id)
-    return {"user_id": user_id, "authenticated": authenticated}
+@mcp.tool(name="auth_status", description="Check if the user is currently authenticated with Salesforce.")
+async def auth_status(user_id: str = "") -> dict:
+    """Check authentication status."""
+    authenticated = await user_auth.is_authenticated(DEFAULT_USER_ID)
+    return {"user_id": DEFAULT_USER_ID, "authenticated": authenticated}
 
 
-@mcp.tool(name="auth_revoke", description="Revoke a user's Salesforce authentication and delete stored tokens.")
-async def auth_revoke(user_id: str) -> dict:
+@mcp.tool(name="auth_revoke", description="Revoke Salesforce authentication and delete stored tokens.")
+async def auth_revoke(user_id: str = "") -> dict:
     """Revoke and delete the user's token."""
-    await user_auth.revoke_token(user_id)
-    return {"user_id": user_id, "revoked": True}
+    await user_auth.revoke_token(DEFAULT_USER_ID)
+    return {"user_id": DEFAULT_USER_ID, "revoked": True}
 
 
 # ── Health endpoints ──
@@ -218,10 +222,15 @@ def _register_mcp_tool(tool_name: str, tool_cls: type) -> None:
                     }
 
                 sf_client = SalesforceClient(_BoundUserAuth(user_auth, DEFAULT_USER_ID))
+
+                # Resolve user's role (defaults to viewer)
+                from src.authz.middleware import resolve_role
+                role = await resolve_role(DEFAULT_USER_ID)
+
                 cleaned_params = validate_tool_params(_name, kwargs)
                 result = await registry.execute_tool(
                     name=_name,
-                    role="csm",
+                    role=role.value,
                     sf_client=sf_client,
                     **cleaned_params,
                 )
