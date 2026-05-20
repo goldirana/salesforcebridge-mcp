@@ -15,6 +15,10 @@ env/
 # Environment variables
 .env
 
+# Auth state (sensitive tokens)
+.tokens.json
+.pending_auth.json
+
 # IDE
 .vscode/
 .idea/
