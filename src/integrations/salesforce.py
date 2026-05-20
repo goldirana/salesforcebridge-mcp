@@ -1,19 +1,27 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, Protocol, runtime_checkable
 
 import httpx
 
 from src.config import settings
 from src.auth.token_store import TokenData
-from src.auth.oauth_client_credentials import ClientCredentialsAuth, AuthenticationError
+from src.auth.oauth_client_credentials import AuthenticationError
+from src.auth.oauth_authorization_code import AuthorizationError
 
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 2
 DEFAULT_QUERY_LIMIT = 200
 MAX_RECORDS = 2000
+
+
+@runtime_checkable
+class AuthProvider(Protocol):
+    """Protocol for any auth provider that can return an access token."""
+
+    async def get_access_token(self, *args: Any, **kwargs: Any) -> TokenData: ...
 
 
 class SalesforceClient:
@@ -27,7 +35,7 @@ class SalesforceClient:
     - Retry with backoff on transient errors (503, 429)
     """
 
-    def __init__(self, auth: ClientCredentialsAuth) -> None:
+    def __init__(self, auth: AuthProvider) -> None:
         self._auth = auth
         self._api_version = settings.salesforce.api_version
 
@@ -89,7 +97,7 @@ class SalesforceClient:
         for attempt in range(MAX_RETRIES + 1):
             try:
                 token = await self._auth.get_access_token()
-            except AuthenticationError as exc:
+            except (AuthenticationError, AuthorizationError) as exc:
                 logger.error("Authentication failed (attempt %d): %s", attempt + 1, exc)
                 last_error = SalesforceAPIError(f"Authentication failed: {exc}", status_code=401)
                 if attempt < MAX_RETRIES:
@@ -119,8 +127,6 @@ class SalesforceClient:
             # 401 — token expired, clear and retry
             if response.status_code == 401 and attempt < MAX_RETRIES:
                 logger.info("Got 401, refreshing token (attempt %d)", attempt + 1)
-                from src.auth.oauth_client_credentials import SERVICE_ACCOUNT_ID
-                await self._auth._store.delete_token(SERVICE_ACCOUNT_ID)
                 continue
 
             # 429 / 503 — transient, retry
