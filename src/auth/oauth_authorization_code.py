@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib # For sha-256 (pkce hashing) 
+import json
 import logging
 import secrets # generating ramdom tokens (verifiers, state)
 import time
 from base64 import urlsafe_b64encode # for encoding hash to url-safe-string
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+from pathlib import Path
 
 import httpx # http client (like requests, but async)
 
@@ -18,6 +20,9 @@ logger = logging.getLogger(__name__)
 AUTHORIZE_ENDPOINT = "/services/oauth2/authorize"
 TOKEN_ENDPOINT = "/services/oauth2/token"
 REVOKE_ENDPOINT = "/services/oauth2/revoke"
+
+# File to persist pending auth state across restarts
+_PENDING_FILE = Path(__file__).resolve().parent.parent.parent / ".pending_auth.json"
 
 
 @dataclass
@@ -45,6 +50,23 @@ class AuthorizationCodeAuth:
         self._store = token_store
         self._sf = settings.salesforce
         self._pending: dict[str, PendingAuth] = {}
+        self._load_pending()
+
+    def _load_pending(self) -> None:
+        """Load pending auth state from disk."""
+        if not _PENDING_FILE.exists():
+            return
+        try:
+            data = json.loads(_PENDING_FILE.read_text(encoding="utf-8"))
+            for state, item in data.items():
+                self._pending[state] = PendingAuth(**item)
+        except (json.JSONDecodeError, TypeError, KeyError):
+            self._pending = {}
+
+    def _save_pending(self) -> None:
+        """Persist pending auth state to disk."""
+        data = {state: asdict(p) for state, p in self._pending.items()}
+        _PENDING_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def generate_authorization_url(self, user_id: str) -> str:
         """
@@ -69,6 +91,7 @@ class AuthorizationCodeAuth:
             user_id=user_id,
             created_at=time.time(),
         )
+        self._save_pending()
 
         params = {
             "response_type": "code",
@@ -91,6 +114,7 @@ class AuthorizationCodeAuth:
         """
         # Validate state
         pending = self._pending.pop(state, None)
+        self._save_pending()
         if pending is None:
             raise AuthorizationError("Invalid or expired state parameter")
 
@@ -171,7 +195,7 @@ class AuthorizationCodeAuth:
             "code_verifier": code_verifier,
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, data=payload)
 
         if response.status_code != 200:
@@ -205,7 +229,7 @@ class AuthorizationCodeAuth:
             "refresh_token": refresh_token,
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, data=payload)
 
         if response.status_code != 200:
@@ -239,6 +263,8 @@ class AuthorizationCodeAuth:
         ]
         for state in expired:
             del self._pending[state]
+        if expired:
+            self._save_pending()
 
     @staticmethod
     def _generate_code_verifier() -> str:
